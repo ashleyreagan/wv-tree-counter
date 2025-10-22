@@ -1,0 +1,12 @@
+rich
+tqdm
+deepforest
+geopandas
+rasterio
+shapely
+numpy
+matplotlib
+matplotlib-scalebar
+pandas
+joblib
+requests
