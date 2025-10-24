@@ -32,10 +32,7 @@ A Python workflow to assess vegetation recovery on West Virginia mining permits 
    - **Permit boundary**, **north arrow**, **scalebar**
 8. Writes a plain-English summary and appends **summary.csv** for cross-permit rollups.
 
----
-
 ## 📁 Project layout
-
 WestVirginia/
 ├─ WV_TreeCounter_R19h_Final_Basemap.py       # main script
 ├─ runlog.txt                                 # global log (also per-permit notes)
