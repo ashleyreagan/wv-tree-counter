@@ -33,27 +33,28 @@ A Python workflow to assess vegetation recovery on West Virginia mining permits 
 8. Writes a plain-English summary and appends **summary.csv** for cross-permit rollups.
 
 ## 📁 Project layout
+```
 WestVirginia/
-├─ WV_TreeCounter_R19h_Final_Basemap.py       # main script
-├─ runlog.txt                                 # global log (also per-permit notes)
-├─ summary.csv                                # running cross-permit summary
+├─ WV_TreeCounter_R19h_Final_Basemap.py      # main script
+├─ runlog.txt                                # global log (also per-permit notes)
+├─ summary.csv                               # running cross-permit summary
 └─ data/
-├─ permits/                                # WVDEP shapefile (auto-downloaded)
-├─ naip_files/                             # final NAIP .tif, .tfw, .ovr, etc (auto-ingested)
-│  └─ downloads/                           # drop .zip or .tif here
-├─ naip_index/ | index/                    # WV NAIP index (auto or manual)
+├─ permits/                                  # WVDEP shapefile (auto-downloaded)
+├─ naip_files/                               # final NAIP .tif, .tfw, .ovr, etc (auto-ingested)
+│  └─ downloads/                             # drop .zip or .tif here
+├─ naip_index/ | index/                      # WV NAIP index (auto or manual)
 ├─ <PERMIT_ID>/
-│  ├─ lookup_info.txt                      # centroid + suggested NAIP tiles
+│  ├─ lookup_info.txt                        # centroid + suggested NAIP tiles
 │  └─ results/
-│     ├─ maps/                             # NDVI/Canopy PNGs with legend/scalebar
-│     ├─ deepforest/                       # DF per-tile shapefiles + merged
-│     ├─ *_NDVI.tif / *_NDVI.png           # per-tile clipped rasters
-│     ├─ NDVI_mean.tif/.png       # permit mosaic + render
-│     ├─ canopy_merged.shp        # merged canopy detections
-│     ├─ results.txt                       # plain-English results
-│     └─ runlog.txt               # permit-specific log (start/end stamps)
+│     ├─ maps/                               # NDVI/Canopy PNGs with legend/scalebar
+│     ├─ deepforest/                      	 # DF per-tile shapefiles + merged
+│     ├─ *_NDVI.tif / *_NDVI.png           	 # per-tile clipped rasters
+│     ├─ NDVI_mean.tif/.png       			 # permit mosaic + render
+│     ├─ canopy_merged.shp        			 # merged canopy detections
+│     ├─ results.txt                         # plain-English results
+│     └─ runlog.txt               			 # permit-specific log (start/end stamps)
 └─ results/ (legacy, if created by older runs)
-
+```
 ---
 
 ## 🗂 Data sources
