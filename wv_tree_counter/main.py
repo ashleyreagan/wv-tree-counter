@@ -98,6 +98,14 @@ from matplotlib_scalebar.scalebar import ScaleBar
 import contextily as ctx
 import pandas as pd
 
+try:
+    from wv_tree_counter.states import STATES, get_state
+    from wv_tree_counter import sources
+except ImportError:  # running main.py directly as a script
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from states import STATES, get_state
+    import sources
+
 # ---------- UI ----------
 theme = Theme({
     "info": "steel_blue3",
@@ -262,6 +270,10 @@ def auto_ingest():
     return count
 
 # ---------- Imagery discovery ----------
+def tile_name(t):
+    """File name of a local Path or a (signed) COG URL."""
+    return os.path.basename(str(t).split("?")[0])
+
 def list_imagery(folder):
     """Raw imagery tiles in `folder`, excluding products this tool wrote."""
     out = []
@@ -281,7 +293,7 @@ def tiles_for_permit(tifs, geom, geom_crs):
                 if box(*src.bounds).intersects(g):
                     hits.append(t)
         except Exception as e:
-            log(f"⚠️ Could not read {t.name}: {e}")
+            log(f"⚠️ Could not read {tile_name(t)}: {e}")
     return hits
 
 def warn_mixed_years(tiles):
@@ -289,7 +301,7 @@ def warn_mixed_years(tiles):
     mosaic makes the result a blend of two different points in time."""
     years = set()
     for t in tiles:
-        m = re.search(r"_((?:19|20)\d{2})\d{4}$", t.stem)
+        m = re.search(r"_((?:19|20)\d{2})\d{4}(?:_\d{8})?$", Path(tile_name(t)).stem)
         if m:
             years.add(m.group(1))
     if len(years) > 1:
@@ -509,8 +521,36 @@ def interpret_site(veg_pct, meanval, canopy_per_acre):
                 "substantial canopy density, indicating successful long-term "
                 "reclamation or natural forest regeneration on former mine lands.")
 
+# ---------- summary.csv ----------
+SUMMARY_COLUMNS = ["date", "state", "permit", "permit_acres", "veg_pix", "thr", "mean_ndvi",
+                   "veg_pct", "canopy", "canopy_per_acre", "lon", "lat",
+                   "imagery_source", "imagery_year", "imagery_dates"]
+
+def append_summary(row, path=None):
+    """Append one row to summary.csv. Older WV-only files (no state/imagery columns)
+    are upgraded in place first, with state = WV for existing rows."""
+    path = Path(path or SUMMARY_CSV)
+    if path.exists():
+        with open(path) as f:
+            header = f.readline().strip().split(",")
+        if header != SUMMARY_COLUMNS:
+            old = pd.read_csv(path, dtype=str)
+            if "state" not in old.columns:
+                old["state"] = "WV"
+            for c in SUMMARY_COLUMNS:
+                if c not in old.columns:
+                    old[c] = ""
+            extra = [c for c in old.columns if c not in SUMMARY_COLUMNS]
+            old[SUMMARY_COLUMNS + extra].to_csv(path, index=False)
+            log(f"📄 Upgraded {path} to the multi-state column layout.")
+            header = SUMMARY_COLUMNS + extra
+    else:
+        header = SUMMARY_COLUMNS
+        pd.DataFrame(columns=header).to_csv(path, index=False)
+    pd.DataFrame([{c: row.get(c, "") for c in header}]).to_csv(path, mode="a", header=False, index=False)
+
 # ---------- Summary + Appalachian Interpretation ----------
-def summarize(pid, res, rec, canopy, geom, crs, permit_area):
+def summarize(pid, res, rec, canopy, geom, crs, permit_area, state="WV", imagery=None):
     """
     Summarizes NDVI, vegetation, canopy, and interpretive context for one permit.
     Writes results.txt, updates summary.csv, and prints formatted Rich table.
@@ -524,8 +564,11 @@ def summarize(pid, res, rec, canopy, geom, crs, permit_area):
     canopy_per_acre = canopy / permit_area if permit_area > 0 else 0
 
     # --- Console output table ---
-    tab = Table(title=f"🌾 WV Tree Counter – {pid}", title_style="gold")
+    imagery = imagery or {}
+    tab = Table(title=f"🌾 Tree Counter – {state} {pid}", title_style="gold")
     for n, v in [
+        ("State", state),
+        ("Imagery", f"{imagery.get('source', 'local')} {imagery.get('year', '')}".strip()),
         ("Permit acres", f"{permit_area:,.1f}"),
         ("Veg pixels", f"{veg:,}"),
         ("NDVI thresh (adaptive)", f"{thr:.2f}"),
@@ -542,7 +585,10 @@ def summarize(pid, res, rec, canopy, geom, crs, permit_area):
     # --- Write results.txt ---
     results_file = res / "results.txt"
     with open(results_file, "w") as f:
+        f.write(f"State: {state}\n")
         f.write(f"Permit: {pid}\n")
+        f.write(f"Imagery: {imagery.get('source', 'local')} {imagery.get('year', '')} "
+                f"{', '.join(imagery.get('dates', []))}\n")
         f.write(f"Permit area (acres): {permit_area:.1f}\n")
         f.write(f"Veg pixels (at adaptive threshold): {veg:,}\n")
         f.write(f"NDVI threshold (adaptive): {thr:.2f}\n")
@@ -556,25 +602,26 @@ def summarize(pid, res, rec, canopy, geom, crs, permit_area):
 
     # --- Append to running summary CSV ---
     cent = to_crs(geom, crs, WGS84).centroid
-    header = "date,permit,permit_acres,veg_pix,thr,mean_ndvi,veg_pct,canopy,canopy_per_acre,lon,lat\n"
-    line = f"{datetime.date.today()},{pid},{permit_area:.1f},{veg},{thr:.2f},{meanval:.2f},{veg_pct:.1f},{canopy},{canopy_per_acre:.4f},{cent.x:.6f},{cent.y:.6f}\n"
-    if not Path(SUMMARY_CSV).exists():
-        with open(SUMMARY_CSV, "w") as csvfile:
-            csvfile.write(header)
-    with open(SUMMARY_CSV, "a") as csvfile:
-        csvfile.write(line)
+    append_summary({
+        "date": str(datetime.date.today()), "state": state, "permit": pid,
+        "permit_acres": f"{permit_area:.1f}", "veg_pix": veg, "thr": f"{thr:.2f}",
+        "mean_ndvi": f"{meanval:.2f}", "veg_pct": f"{veg_pct:.1f}", "canopy": canopy,
+        "canopy_per_acre": f"{canopy_per_acre:.4f}", "lon": f"{cent.x:.6f}", "lat": f"{cent.y:.6f}",
+        "imagery_source": imagery.get("source", "local"), "imagery_year": imagery.get("year", ""),
+        "imagery_dates": ";".join(imagery.get("dates", [])),
+    })
 
     # --- Log and colorized completion panel ---
     console.print(Panel.fit(
         f"[gold]✅ Complete![/gold]\n"
-        f"[steel_blue3]Permit:[/steel_blue3] {pid}\n"
+        f"[steel_blue3]Permit:[/steel_blue3] {state} {pid}\n"
         f"[steel_blue3]Area:[/steel_blue3] {permit_area:,.1f} acres\n"
         f"[steel_blue3]NDVI mean:[/steel_blue3] {meanval:.2f}\n"
         f"[steel_blue3]Vegetation cover:[/steel_blue3] {veg_pct:.1f}%\n"
         f"[steel_blue3]Canopy crowns:[/steel_blue3] {canopy:,}\n\n"
         f"[gold]Summary → {res}/results.txt[/gold]\n\n"
         f"[italic]{interp_text}[/italic]",
-        title="🌾 WV Tree Counter – Appalachian Summary",
+        title="🌾 Tree Counter – Appalachian Summary",
         border_style="yellow3", width=80
     ))
     return {"veg_pix": veg, "thr": thr, "mean_ndvi": meanval, "veg_pct": veg_pct,
@@ -622,25 +669,31 @@ def get_permit_area(permits, pid):
     Area is measured in an equal-area projection (EPSG:5070). Web Mercator
     (EPSG:3857) overstates area by ~1.4–1.7x at Appalachian latitudes.
     """
-    sel = permits[permits["permit_id"].str.upper() == pid]
+    sel = permits[permits["permit_id"].astype(str).str.upper() == pid]
     if sel.empty:
         raise ValueError(f"Permit {pid} not found in permit shapefile.")
+    return permit_geometry(sel, pid)
 
-    geom = sel.iloc[0].geometry
-    area_m2 = gpd.GeoSeries([geom], crs=permits.crs).to_crs(AREA_CRS).area.iloc[0]
+def permit_geometry(sel, pid=""):
+    """Dissolve every polygon for a permit (GeoMine often returns several) into one
+    geometry and measure it in acres (equal-area EPSG:5070)."""
+    geom = sources.union(sel.geometry)
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+    area_m2 = gpd.GeoSeries([geom], crs=sel.crs).to_crs(AREA_CRS).area.iloc[0]
     permit_area = area_m2 / SQM_PER_ACRE
-
-    log(f"📐 Calculated permit area for {pid}: {permit_area:.1f} acres")
+    log(f"📐 Calculated permit area for {pid}: {permit_area:.1f} acres ({len(sel)} polygon(s))")
     return geom, permit_area
 
 # ---------- Analysis (no prompts; reusable for batch runs) ----------
-def analyze_permit(pid, geom, crs, permit_area, tifs, res, maps, deep, run_df=False, basemap=True):
+def analyze_permit(pid, geom, crs, permit_area, tifs, res, maps, deep, run_df=False, basemap=True,
+                   state="WV", imagery=None):
     """Mosaic → index → maps → optional DeepForest → summary, for one permit."""
     tiles = tiles_for_permit(tifs, geom, crs)
     if not tiles:
         log(f"❌ None of the {len(tifs)} imagery tiles intersect permit {pid}.")
         return None
-    log(f"🧩 {len(tiles)} tile(s) intersect {pid}: {', '.join(t.name for t in tiles)}")
+    log(f"🧩 {len(tiles)} tile(s) intersect {pid}: {', '.join(tile_name(t) for t in tiles)}")
     warn_mixed_years(tiles)
 
     work_crs = utm_crs_for(geom, crs)
@@ -661,48 +714,201 @@ def analyze_permit(pid, geom, crs, permit_area, tifs, res, maps, deep, run_df=Fa
         rgb_path = write_rgb(arr, transform, work_crs, res / f"{pid}_rgb_mosaic.tif")
         _, canopy = run_deepforest(rgb_path, geom, crs, deep, pid)
 
-    return summarize(pid, res, rec, canopy, geom, crs, permit_area)
+    return summarize(pid, res, rec, canopy, geom, crs, permit_area, state=state, imagery=imagery)
 
-# ---------- Main ----------
-def main():
-    ensure_dirs()
-    console.print(Panel.fit("[hdr]🌾 WV Tree Counter (R19h Final – Basemap Edition)[/hdr]", border_style="yellow3", width=80))
-    pshp = ensure_permits()
-    ishp = ensure_index()
-    permits = gpd.read_file(pshp)
-    crs = permits.crs
+# ---------- Permit lookup (any state) ----------
+def resolve_permit(state, pid, permit_source=None, permit_file=None, id_field=None):
+    """Return (geometry, crs, acres) for a permit in any supported state.
 
-    # Prompt user
-    for _ in range(3):
-        pid = Prompt.ask("🔢 WV permit number (e.g. S300120)").strip().upper()
-        sel = permits[permits["permit_id"].str.upper() == pid]
-        if not sel.empty:
-            break
-        console.print("[warn]Permit not found.[/warn]")
-    if sel.empty:
-        sys.exit("❌ No matching permit.")
+    Sources: WVDEP shapefile (WV default), OSMRE GeoMine (PA, OH, VA, KY, TN, AL, or WV
+    with --permit-source geomine), or a local boundary file (--permit-file, needed for MD)."""
+    state, cfg = get_state(state)
+    src = "file" if permit_file else (permit_source or cfg["permit_source"])
+    if src == "file":
+        if not permit_file or not id_field:
+            raise ValueError(f"{cfg['name']} needs --permit-file and --id-field "
+                             f"(permit boundaries from {cfg['regulator']}).")
+        sel = sources.load_permit_file(permit_file, id_field, pid)
+        if sel.empty:
+            raise ValueError(f"Permit {pid} not found in {permit_file} ({id_field}).")
+    elif src == "wvdep":
+        permits = gpd.read_file(ensure_permits())
+        sel = permits[permits["permit_id"].astype(str).str.upper() == pid]
+        if sel.empty:
+            raise ValueError(f"Permit {pid} not found in the WVDEP permit shapefile.")
+    elif src == "geomine":
+        if cfg["geomine_contact"] is None:
+            raise ValueError(f"{cfg['name']} is not in GeoMine; use --permit-file.")
+        sel, suggestions = sources.fetch_permit_geomine(cfg["geomine_contact"], pid)
+        if sel.empty:
+            hint = f" Similar IDs: {', '.join(suggestions)}" if suggestions else ""
+            raise ValueError(f"Permit {pid} not found in GeoMine for {cfg['name']}.{hint}")
+        if "permittee" in sel.columns:
+            names = sorted(set(sel["permittee"].dropna().astype(str)))
+            log(f"ℹ️ GeoMine: {len(sel)} polygon(s); permittee: {', '.join(names) or 'n/a'}")
+    else:
+        raise ValueError(f"Unknown permit source '{src}'")
+    geom, acres = permit_geometry(sel, pid)
+    return geom, sel.crs, acres
 
-    geom, permit_area = get_permit_area(permits, pid)
-    pdir = ROOT / pid
+# ---------- Imagery acquisition ----------
+def get_imagery(mode, state, pid, geom, crs, pdir, year=None, interactive=False):
+    """Return (tiles, imagery_meta). mode 'stac' streams NAIP COGs from the Planetary
+    Computer catalog (works for every state, no downloads); 'local' uses .tif files
+    in data/naip_files/."""
+    if mode == "stac":
+        g4326 = to_crs(geom, crs, WGS84)
+        info = sources.naip_for_permit(g4326, year=year)
+        log(f"🛰️ NAIP {info['year']} ({', '.join(info['states']).upper()}): {len(info['hrefs'])} tile(s), "
+            f"{'/'.join(f'{g:g}' for g in info['gsd'])} m, dates {', '.join(info['dates'])}")
+        log(f"   Other NAIP years here: {', '.join(y for y in info['available_years'] if y != info['year'])}")
+        if info["off_season_dates"]:
+            log(f"⚠️ Catalog date(s) {', '.join(info['off_season_dates'])} fall outside May–Sept. "
+                "NAIP catalog dates are sometimes delivery dates – confirm the imagery is leaf-on.")
+        with open(pdir / "imagery_info.txt", "w") as f:
+            f.write(f"NAIP year: {info['year']}\nDates: {', '.join(info['dates'])}\n"
+                    f"GSD (m): {info['gsd']}\nItems:\n" + "\n".join(f" - {i}" for i in info["ids"]) + "\n")
+        return info["hrefs"], {"source": "naip-stac", "year": info["year"], "dates": info["dates"]}
+
+    # local files
+    if interactive and state == "WV":
+        make_lookup_info(gpd.GeoDataFrame(geometry=[geom], crs=crs), ensure_index(), pid, pdir)
+    if interactive:
+        console.print(Panel.fit(f"Place NAIP .zip/.tif files for this permit into:\n{DL_DIR}\n\nPress Enter to continue.",
+                                title="⏸️ Pause for Downloads", border_style="yellow3"))
+        input()
+    auto_ingest()
+    tifs = list_imagery(NAIP_DIR)
+    years = warn_mixed_years(tiles_for_permit(tifs, geom, crs)) if tifs else []
+    return tifs, {"source": "local", "year": years[0] if len(years) == 1 else "", "dates": []}
+
+# ---------- One permit, end to end ----------
+def run_permit(state, pid, imagery="stac", year=None, run_df=False, basemap=True,
+               permit_source=None, permit_file=None, id_field=None, interactive=False):
+    state, cfg = get_state(state)
+    pid = pid.strip().upper()
+    console.print(f"[hdr]── {cfg['name']} permit {pid} ──[/hdr]")
+    geom, crs, permit_area = resolve_permit(state, pid, permit_source, permit_file, id_field)
+
+    pdir = ROOT / state / pid
     res = pdir / "results"
     maps = res / "maps"
     deep = res / "deepforest"
     for d in [pdir, res, maps, deep]:
         d.mkdir(parents=True, exist_ok=True)
 
-    make_lookup_info(gpd.GeoDataFrame(geometry=[geom], crs=crs), ishp, pid, pdir)
-    console.print(Panel.fit(f"Place NAIP .zip/.tif files listed in [gold]lookup_info.txt[/gold]\ninto:\n{DL_DIR}\n\nPress Enter to continue.", title="⏸️ Pause for Downloads", border_style="yellow3"))
-    input()
-
-    auto_ingest()
-    tifs = list_imagery(NAIP_DIR)
-    if not tifs:
-        sys.exit("❌ No imagery found.")
-
-    run_df = Prompt.ask("Run DeepForest? (y/N)", default="n").lower().startswith("y")
+    tiles, meta = get_imagery(imagery, state, pid, geom, crs, pdir, year=year, interactive=interactive)
+    if not tiles:
+        raise RuntimeError("No imagery found.")
     console.print("[info]🌿 Building permit mosaic and computing vegetation index…[/info]")
-    analyze_permit(pid, geom, crs, permit_area, tifs, res, maps, deep, run_df=run_df)
+    out = analyze_permit(pid, geom, crs, permit_area, tiles, res, maps, deep, run_df=run_df,
+                         basemap=basemap, state=state, imagery=meta)
     console.print(Panel.fit(f"[good]✅ Complete![/good]\nResults → {res}", title="🌾 Done", border_style="yellow3"))
+    return out
+
+def read_permit_list(path, default_state):
+    """One permit per line: 'PERMIT' or 'STATE,PERMIT'. Blank lines and # comments skipped."""
+    jobs = []
+    for line in Path(path).read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2 and parts[0].upper() in STATES:
+            jobs.append((parts[0].upper(), parts[1]))
+        else:
+            if not default_state:
+                raise ValueError(f"'{line}' has no state; add 'ST,PERMIT' or pass --state.")
+            jobs.append((default_state, parts[0]))
+    return jobs
+
+# ---------- CLI ----------
+def build_parser():
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="wv-tree-counter",
+        description="Vegetation (NDVI) and canopy analysis on Appalachian coal mining permits. "
+                    "Run with no arguments for the interactive prompts.")
+    ap.add_argument("--state", help=f"Two-letter state: {', '.join(STATES)}")
+    ap.add_argument("--permit", action="append", help="Permit ID (repeatable)")
+    ap.add_argument("--permit-list", help="Text file: one 'PERMIT' or 'STATE,PERMIT' per line")
+    ap.add_argument("--imagery", choices=["stac", "local"], default="stac",
+                    help="stac = stream NAIP from the Planetary Computer catalog (default); "
+                         "local = .tif files in data/naip_files/")
+    ap.add_argument("--year", help="NAIP year (default: newest year that fully covers the permit)")
+    ap.add_argument("--deepforest", action="store_true", help="Also run DeepForest crown detection")
+    ap.add_argument("--no-basemap", action="store_true", help="Skip the Esri basemap on maps")
+    ap.add_argument("--permit-source", choices=["wvdep", "geomine"],
+                    help="Override the state's default permit source")
+    ap.add_argument("--permit-file", help="Local permit boundary file (shapefile/GeoPackage/GeoJSON)")
+    ap.add_argument("--id-field", help="Permit ID column in --permit-file")
+    ap.add_argument("--list-states", action="store_true", help="Show supported states and exit")
+    return ap
+
+def show_states():
+    tab = Table(title="Supported states", title_style="gold")
+    for c in ["State", "Permit source", "Regulator", "Coal fields"]:
+        tab.add_column(c)
+    for code, cfg in STATES.items():
+        tab.add_row(code, cfg["permit_source"], cfg["regulator"], cfg["coal_fields"])
+    console.print(tab)
+
+def run_cli(argv=None):
+    """Parse arguments and run; returns the list of per-permit summaries."""
+    ensure_dirs()
+    args = build_parser().parse_args(argv)
+    console.print(Panel.fit("[hdr]🌾 Tree Counter – Appalachian Coal Country (WV · PA · OH · MD · VA · KY · TN · AL)[/hdr]",
+                            border_style="yellow3", width=80))
+    if args.list_states:
+        show_states()
+        return []
+
+    opts = dict(imagery=args.imagery, year=args.year, run_df=args.deepforest,
+                basemap=not args.no_basemap, permit_source=args.permit_source,
+                permit_file=args.permit_file, id_field=args.id_field)
+
+    jobs = []
+    if args.permit_list:
+        jobs += read_permit_list(args.permit_list, args.state.upper() if args.state else None)
+    if args.permit:
+        if not args.state:
+            sys.exit("❌ --permit needs --state.")
+        jobs += [(args.state.upper(), p) for p in args.permit]
+
+    if not jobs:  # interactive mode
+        show_states()
+        state = Prompt.ask("🗺️ State", choices=list(STATES), default="WV")
+        cfg = STATES[state]
+        if cfg["permit_source"] == "file" and not opts["permit_file"]:
+            opts["permit_file"] = Prompt.ask(f"Path to {cfg['name']} permit boundary file")
+            opts["id_field"] = Prompt.ask("Permit ID field name")
+        opts["imagery"] = Prompt.ask("Imagery", choices=["stac", "local"], default="stac")
+        opts["run_df"] = Prompt.ask("Run DeepForest? (y/N)", default="n").lower().startswith("y")
+        for attempt in range(3):
+            pid = Prompt.ask(f"🔢 {cfg['name']} permit number").strip().upper()
+            try:
+                return [run_permit(state, pid, interactive=True, **opts)]
+            except ValueError as e:
+                console.print(f"[warn]{e}[/warn]")
+        sys.exit("❌ No matching permit.")
+
+    results, failures = [], []
+    for state, pid in jobs:
+        try:
+            results.append(run_permit(state, pid, **opts))
+        except Exception as e:
+            log(f"❌ {state} {pid}: {e}")
+            failures.append((state, pid, str(e)))
+    console.print(Panel.fit(f"[gold]Batch finished:[/gold] {len(results)} succeeded, {len(failures)} failed"
+                            + "".join(f"\n  • {s} {p}: {m}" for s, p, m in failures),
+                            title="🌾 Batch", border_style="yellow3"))
+    if failures and not results:
+        raise SystemExit(1)
+    return results
+
+def main(argv=None):
+    """Console-script entry point (returns None so the exit code stays 0 on success)."""
+    run_cli(argv)
 
 
 # ---------- Entrypoint ----------

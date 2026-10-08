@@ -1,8 +1,9 @@
 # 🌾 WV Tree Counter – R19h (Basemap Edition)
 **Author:** Ashley Mitchell, OSMRE • **Year:** 2025
 
-A Python workflow to assess vegetation recovery on West Virginia mining permits using:
-- **WVDEP permit boundaries**
+A Python workflow to assess vegetation recovery on coal mining permits across Appalachian coal country — **WV, PA, OH, MD, VA, KY, TN and AL** — using:
+- **Permit boundaries** from WVDEP (WV), OSMRE GeoMine (PA, OH, VA, KY, TN, AL), or your own file (MD, or any state offline)
+- **NAIP imagery streamed automatically** from the Microsoft Planetary Computer catalog (or your own local tiles)
 - **NAIP 4-band imagery (RGB + NIR)**
 - **NDVI/GRVI** indices (adaptive thresholding)
 - **DeepForest** canopy crown detection (optional)
@@ -11,7 +12,49 @@ A Python workflow to assess vegetation recovery on West Virginia mining permits 
 
 ---
 
-## ✨ What it does (end-to-end)
+## 🗺 Multi-state quick start
+
+```bash
+# One permit, imagery streamed automatically (newest NAIP year that fully covers the permit)
+wv-tree-counter --state PA --permit 56110101
+
+# Pick a NAIP year, add DeepForest crowns
+wv-tree-counter --state KY --permit 8360123 --year 2020 --deepforest
+
+# Batch: one "STATE,PERMIT" (or just "PERMIT" with --state) per line
+wv-tree-counter --permit-list permits.txt
+
+# Maryland (not in GeoMine) – supply MDE's permit layer
+wv-tree-counter --state MD --permit SM-00-123 --permit-file md_permits.gpkg --id-field PERMIT_NO
+
+# Original WV workflow with manually downloaded tiles
+wv-tree-counter --state WV --permit S300120 --imagery local
+
+# No arguments = interactive prompts (asks for state first)
+wv-tree-counter
+```
+
+| State | Permit source | Regulator |
+|---|---|---|
+| WV | WVDEP TAGIS shapefile (or `--permit-source geomine`) | WVDEP DMR |
+| PA | OSMRE GeoMine | PA DEP Bureau of Mining Programs |
+| OH | OSMRE GeoMine | ODNR DMRM |
+| MD | `--permit-file` (not in GeoMine) | MDE Mining Program |
+| VA | OSMRE GeoMine | Virginia Energy |
+| KY | OSMRE GeoMine | KY EEC Division of Mine Permits |
+| TN | OSMRE GeoMine | OSMRE Knoxville FO (federal program) |
+| AL | OSMRE GeoMine | Alabama Surface Mining Commission |
+
+How it works across states:
+- **Permits:** GeoMine is queried by `permit_id` and the state's regulatory-authority code, so identical permit numbers in two states never collide. All polygons for a permit are dissolved before acreage is measured. If an ID isn't found, the tool lists similar IDs (formats differ by state). GeoMine may only be reachable on the DOI network/VPN; `--permit-file` works anywhere.
+- **Imagery:** NAIP 4-band cloud-optimized GeoTIFFs are found by permit footprint, so permits near a state line pick up tiles from both states. One NAIP year is used per run (the newest that fully covers the permit, or `--year`). Only the pixels over the permit are streamed, nothing is downloaded in full. `imagery_info.txt` records the tiles and dates. The log warns when a catalog date falls outside May–September.
+- **Projection:** each permit is processed in its own UTM zone (16N for AL/TN/west KY, 17N for most of the region, 18N for eastern PA/MD/WV Panhandle). Acreage is always measured in EPSG:5070.
+- **Outputs** go to `data/<STATE>/<PERMIT>/results/`. `summary.csv` gains `state`, `imagery_source`, `imagery_year` and `imagery_dates` columns; an older WV-only `summary.csv` is upgraded in place, and its existing rows are marked WV.
+- **Batch runs** keep going when one permit fails and list the failures at the end.
+
+---
+
+## ✨ What it does (end-to-end, original WV interactive flow)
 1. **Loads WVDEP permits** (auto-downloads if missing).
 2. Prompts for a **permit number** (e.g., `S300120`) and computes **true GIS acres** (equal-area EPSG:5070, valid anywhere in the CONUS).
 3. Loads the **WV NAIP 2022+ tile index**, intersects with the permit, and writes:
