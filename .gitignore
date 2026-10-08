@@ -1,1 +1,16 @@
 .DS_Store
+# Geodata and run outputs
+data/
+runlog.txt
+summary.csv
+*.tif
+*.tiff
+*.zip
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.env

@@ -13,7 +13,7 @@ A Python workflow to assess vegetation recovery on West Virginia mining permits 
 
 ## ✨ What it does (end-to-end)
 1. **Loads WVDEP permits** (auto-downloads if missing).
-2. Prompts for a **permit number** (e.g., `S300120`) and computes **true GIS acres**.
+2. Prompts for a **permit number** (e.g., `S300120`) and computes **true GIS acres** (equal-area EPSG:5070, valid anywhere in the CONUS).
 3. Loads the **WV NAIP 2022+ tile index**, intersects with the permit, and writes:
    - **Centroid** (WGS84 + UTM 17N)
    - **Suggested NAIP tile names**
@@ -75,7 +75,8 @@ conda create -n smcra_wv -c conda-forge python=3.10 gdal geos proj
 conda activate smcra_wv
 
 # Core deps
-pip install rich tqdm deepforest geopandas rasterio shapely numpy matplotlib pandas joblib requests matplotlib-scalebar contextily
+pip install -e .                    # core tool
+pip install -e '.[deepforest]'      # optional: canopy crown detection (DeepForest 1.4–2.x)
 
 DeepForest on Apple Silicon: It uses PyTorch with Metal (MPS). If MPS behaves oddly, it falls back to CPU automatically in the script.
 
@@ -102,17 +103,21 @@ You can re-run the same permit any time; the script skips work it already did an
 	•	If NIR missing/unreadable, falls back to GRVI = (G–R)/(G+R).
 	•	Adaptive threshold:
 	•	Start at 0.25; if no vegetation pixels, it tries 0.20 → 0.15 → 0.10.
-	•	The chosen threshold is reported per tile and in the summary.
-	•	Clipping & mosaics: All indices are clipped to the permit; mosaics resample tiles to a common grid automatically.
+	•	The chosen threshold is reported in the summary; "Veg pixels" is counted at that threshold.
+	•	Vegetation cover (%) always uses the fixed 0.25 threshold and only counts pixels inside the permit polygon, so permits stay comparable.
+	•	Mosaic first: every tile that touches the permit is merged into ONE permit mosaic (data/<PERMIT>/results/<PERMIT>_mosaic.tif) before any index is computed. Overlapping NAIP tile buffers are counted once, and tiles in a different UTM zone (e.g. zone 18 in the Eastern Panhandle) are reprojected into the permit's own UTM zone.
+	•	Drone orthomosaics whose 4th band is an alpha mask are detected and processed as RGB (GRVI) instead of treating alpha as NIR.
+	•	If the tiles come from more than one NAIP year, the log warns you — keep one year per run.
 
 ⸻
 
 🌳 DeepForest (optional)
-	•	Runs inside the permit only, on RGB (bands 1–3).
-	•	Auto-downloads the default canopy model on first run if missing.
-	•	Outputs:
-	•	per-tile *_canopy.shp
-	•	permit-level <PERMIT>_canopy_merged.shp
+	•	Install separately: pip install -e '.[deepforest]' (DeepForest 1.4–2.x; the old use_release() call was removed in 2.x).
+	•	Runs once on the permit RGB mosaic with tiled prediction (400 px patches), so crowns in tile overlaps are not double-counted.
+	•	Crown boxes are converted from pixel to map coordinates; only crowns whose centre is inside the permit are kept.
+	•	Downloads the weecology/deepforest-tree model on first run.
+	•	Resolution caveat: the model was trained on ~10 cm imagery. On 60 cm NAIP it only finds large, mature crowns — treat counts as a lower bound. Drone orthomosaics are a much better fit.
+	•	Output: <PERMIT>_canopy.shp in results/deepforest/
 	•	Summary shows total crowns and crowns per acre.
 
 ⸻
@@ -178,6 +183,15 @@ print(g.nlargest(2,"acres_geom")[["permit_id","operator","acres_geom"]].to_strin
 EOF
 
 Site you tested: S501397 centroid ≈ 37.876980, -81.799671 (WGS84) — the tool writes this to lookup_info.txt automatically.
+
+⸻
+
+🧪 Tests
+
+Synthetic-raster regression tests (no downloads needed):
+
+pip install -e '.[test]'
+pytest -q
 
 ⸻
 

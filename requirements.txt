@@ -1,12 +1,13 @@
 rich
 tqdm
-deepforest
 geopandas
-rasterio
-shapely
+rasterio>=1.3
+shapely>=2.0
 numpy
 matplotlib
 matplotlib-scalebar
+contextily
 pandas
-joblib
 requests
+# Optional – canopy crown detection. use_release() was removed in 2.x; the code uses load_model().
+deepforest>=1.4,<3
