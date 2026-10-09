@@ -1,8 +1,9 @@
 # 🌾 WV Tree Counter – R19h (Basemap Edition)
 **Author:** Ashley Mitchell, OSMRE • **Year:** 2025
 
-A Python workflow to assess vegetation recovery on West Virginia mining permits using:
-- **WVDEP permit boundaries**
+A Python workflow to assess vegetation recovery on coal mining permits across Appalachian coal country — **WV, PA, OH, MD, VA, KY, TN and AL** — using:
+- **Permit boundaries** from WVDEP (WV), OSMRE GeoMine (PA, OH, VA, KY, TN, AL), or your own file (MD, or any state offline)
+- **NAIP imagery streamed automatically** from the Microsoft Planetary Computer catalog (or your own local tiles)
 - **NAIP 4-band imagery (RGB + NIR)**
 - **NDVI/GRVI** indices (adaptive thresholding)
 - **DeepForest** canopy crown detection (optional)
@@ -11,9 +12,51 @@ A Python workflow to assess vegetation recovery on West Virginia mining permits 
 
 ---
 
-## ✨ What it does (end-to-end)
+## 🗺 Multi-state quick start
+
+```bash
+# One permit, imagery streamed automatically (newest NAIP year that fully covers the permit)
+wv-tree-counter --state PA --permit 56110101
+
+# Pick a NAIP year, add DeepForest crowns
+wv-tree-counter --state KY --permit 8360123 --year 2020 --deepforest
+
+# Batch: one "STATE,PERMIT" (or just "PERMIT" with --state) per line
+wv-tree-counter --permit-list permits.txt
+
+# Maryland (not in GeoMine) – supply MDE's permit layer
+wv-tree-counter --state MD --permit SM-00-123 --permit-file md_permits.gpkg --id-field PERMIT_NO
+
+# Original WV workflow with manually downloaded tiles
+wv-tree-counter --state WV --permit S300120 --imagery local
+
+# No arguments = interactive prompts (asks for state first)
+wv-tree-counter
+```
+
+| State | Permit source | Regulator |
+|---|---|---|
+| WV | WVDEP TAGIS shapefile (or `--permit-source geomine`) | WVDEP DMR |
+| PA | OSMRE GeoMine | PA DEP Bureau of Mining Programs |
+| OH | OSMRE GeoMine | ODNR DMRM |
+| MD | `--permit-file` (not in GeoMine) | MDE Mining Program |
+| VA | OSMRE GeoMine | Virginia Energy |
+| KY | OSMRE GeoMine | KY EEC Division of Mine Permits |
+| TN | OSMRE GeoMine | OSMRE Knoxville FO (federal program) |
+| AL | OSMRE GeoMine | Alabama Surface Mining Commission |
+
+How it works across states:
+- **Permits:** GeoMine is queried by `permit_id` and the state's regulatory-authority code, so identical permit numbers in two states never collide. All polygons for a permit are dissolved before acreage is measured. If an ID isn't found, the tool lists similar IDs (formats differ by state). GeoMine may only be reachable on the DOI network/VPN; `--permit-file` works anywhere.
+- **Imagery:** NAIP 4-band cloud-optimized GeoTIFFs are found by permit footprint, so permits near a state line pick up tiles from both states. One NAIP year is used per run (the newest that fully covers the permit, or `--year`). Only the pixels over the permit are streamed, nothing is downloaded in full. `imagery_info.txt` records the tiles and dates. The log warns when a catalog date falls outside May–September.
+- **Projection:** each permit is processed in its own UTM zone (16N for AL/TN/west KY, 17N for most of the region, 18N for eastern PA/MD/WV Panhandle). Acreage is always measured in EPSG:5070.
+- **Outputs** go to `data/<STATE>/<PERMIT>/results/`. `summary.csv` gains `state`, `imagery_source`, `imagery_year` and `imagery_dates` columns; an older WV-only `summary.csv` is upgraded in place, and its existing rows are marked WV.
+- **Batch runs** keep going when one permit fails and list the failures at the end.
+
+---
+
+## ✨ What it does (end-to-end, original WV interactive flow)
 1. **Loads WVDEP permits** (auto-downloads if missing).
-2. Prompts for a **permit number** (e.g., `S300120`) and computes **true GIS acres**.
+2. Prompts for a **permit number** (e.g., `S300120`) and computes **true GIS acres** (equal-area EPSG:5070, valid anywhere in the CONUS).
 3. Loads the **WV NAIP 2022+ tile index**, intersects with the permit, and writes:
    - **Centroid** (WGS84 + UTM 17N)
    - **Suggested NAIP tile names**
@@ -75,7 +118,8 @@ conda create -n smcra_wv -c conda-forge python=3.10 gdal geos proj
 conda activate smcra_wv
 
 # Core deps
-pip install rich tqdm deepforest geopandas rasterio shapely numpy matplotlib pandas joblib requests matplotlib-scalebar contextily
+pip install -e .                    # core tool
+pip install -e '.[deepforest]'      # optional: canopy crown detection (DeepForest 1.4–2.x)
 
 DeepForest on Apple Silicon: It uses PyTorch with Metal (MPS). If MPS behaves oddly, it falls back to CPU automatically in the script.
 
@@ -102,17 +146,21 @@ You can re-run the same permit any time; the script skips work it already did an
 	•	If NIR missing/unreadable, falls back to GRVI = (G–R)/(G+R).
 	•	Adaptive threshold:
 	•	Start at 0.25; if no vegetation pixels, it tries 0.20 → 0.15 → 0.10.
-	•	The chosen threshold is reported per tile and in the summary.
-	•	Clipping & mosaics: All indices are clipped to the permit; mosaics resample tiles to a common grid automatically.
+	•	The chosen threshold is reported in the summary; "Veg pixels" is counted at that threshold.
+	•	Vegetation cover (%) always uses the fixed 0.25 threshold and only counts pixels inside the permit polygon, so permits stay comparable.
+	•	Mosaic first: every tile that touches the permit is merged into ONE permit mosaic (data/<PERMIT>/results/<PERMIT>_mosaic.tif) before any index is computed. Overlapping NAIP tile buffers are counted once, and tiles in a different UTM zone (e.g. zone 18 in the Eastern Panhandle) are reprojected into the permit's own UTM zone.
+	•	Drone orthomosaics whose 4th band is an alpha mask are detected and processed as RGB (GRVI) instead of treating alpha as NIR.
+	•	If the tiles come from more than one NAIP year, the log warns you — keep one year per run.
 
 ⸻
 
 🌳 DeepForest (optional)
-	•	Runs inside the permit only, on RGB (bands 1–3).
-	•	Auto-downloads the default canopy model on first run if missing.
-	•	Outputs:
-	•	per-tile *_canopy.shp
-	•	permit-level <PERMIT>_canopy_merged.shp
+	•	Install separately: pip install -e '.[deepforest]' (DeepForest 1.4–2.x; the old use_release() call was removed in 2.x).
+	•	Runs once on the permit RGB mosaic with tiled prediction (400 px patches), so crowns in tile overlaps are not double-counted.
+	•	Crown boxes are converted from pixel to map coordinates; only crowns whose centre is inside the permit are kept.
+	•	Downloads the weecology/deepforest-tree model on first run.
+	•	Resolution caveat: the model was trained on ~10 cm imagery. On 60 cm NAIP it only finds large, mature crowns — treat counts as a lower bound. Drone orthomosaics are a much better fit.
+	•	Output: <PERMIT>_canopy.shp in results/deepforest/
 	•	Summary shows total crowns and crowns per acre.
 
 ⸻
@@ -178,6 +226,15 @@ print(g.nlargest(2,"acres_geom")[["permit_id","operator","acres_geom"]].to_strin
 EOF
 
 Site you tested: S501397 centroid ≈ 37.876980, -81.799671 (WGS84) — the tool writes this to lookup_info.txt automatically.
+
+⸻
+
+🧪 Tests
+
+Synthetic-raster regression tests (no downloads needed):
+
+pip install -e '.[test]'
+pytest -q
 
 ⸻
 
